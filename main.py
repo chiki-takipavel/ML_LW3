@@ -1,0 +1,299 @@
+import os
+import cv2
+import random
+import logging
+import datetime
+import pandas as pd
+import tensorflow as tf
+from matplotlib import pyplot as plt
+
+DATASET_FOLDER = r'../Dataset'
+CLASSES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
+CLASSES_COUNT = len(CLASSES)
+DATA_COLUMN_NAME = 'data'
+LABELS_COLUMN_NAME = 'labels'
+HASHED_DATA_COLUMN_NAME = 'data_bytes'
+BALANCE_BORDER = 0.85
+TRAIN_SIZE = 200000
+VALIDATION_SIZE = 10000
+TEST_SIZE = 19000
+BATCH_SIZE = 128
+INITIAL_LEARNING_RATE = 0.01
+MIN_LEARNING_RATE = 1e-6
+DECAY_STEPS = 20000
+DECAY_RATE = 0.9
+EPOCHS = 50
+EPOCHS_RANGE = range(EPOCHS)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def show_one_image(image_folder):
+    file = random.choice(os.listdir(image_folder))
+    image_path = os.path.join(image_folder, file)
+    img = cv2.imread(image_path)
+    plt.imshow(img)
+    plt.show()
+
+
+def show_some_images():
+    for class_item in CLASSES:
+        image_folder = os.path.join(DATASET_FOLDER, class_item)
+        show_one_image(image_folder)
+
+
+def get_class_data(folder_path):
+    result_data = list()
+    files = os.listdir(folder_path)
+    for file in files:
+        image_path = os.path.join(folder_path, file)
+        img = cv2.imread(image_path)
+        if img is not None:
+            result_data.append(img)
+
+    return result_data
+
+
+def get_classes_images_counts(data_frame):
+    classes_images_counts = list()
+    for class_index in range(CLASSES_COUNT):
+        labels = data_frame[LABELS_COLUMN_NAME]
+        class_rows = data_frame[labels == class_index]
+        class_count = len(class_rows)
+
+        classes_images_counts.append(class_count)
+        logging.info(f"Class {CLASSES[class_index]} contains {class_count} images")
+
+    return classes_images_counts
+
+
+def create_data_frame():
+    data = list()
+    labels = list()
+    for class_item in CLASSES:
+        class_folder_path = os.path.join(DATASET_FOLDER, class_item)
+        class_data = get_class_data(class_folder_path)
+
+        data.extend(class_data)
+        labels.extend([CLASSES.index(class_item) for _ in range(len(class_data))])
+
+    data_frame = pd.DataFrame({DATA_COLUMN_NAME: data, LABELS_COLUMN_NAME: labels})
+    logging.info("Data frame is created")
+
+    return data_frame
+
+
+def remove_duplicates(data):
+    data_bytes = [item.tobytes() for item in data[DATA_COLUMN_NAME]]
+    data[HASHED_DATA_COLUMN_NAME] = data_bytes
+    data.sort_values(HASHED_DATA_COLUMN_NAME, inplace=True)
+    data.drop_duplicates(subset=HASHED_DATA_COLUMN_NAME, keep='first', inplace=True)
+    data.pop(HASHED_DATA_COLUMN_NAME)
+    logging.info("Duplicates removed")
+
+    return data
+
+
+def show_classes_histogram(classes_images_counts):
+    plt.figure()
+    plt.bar(CLASSES, classes_images_counts)
+    plt.show()
+    logging.info("Histogram shown")
+
+
+def check_classes_balance(data_frame):
+    classes_images_counts = get_classes_images_counts(data_frame)
+
+    max_images_count = max(classes_images_counts)
+    avg_images_count = sum(classes_images_counts) / len(classes_images_counts)
+    balance_percent = avg_images_count / max_images_count
+
+    show_classes_histogram(classes_images_counts)
+    logging.info(f"Balance: {balance_percent:.3f}")
+    if balance_percent > BALANCE_BORDER:
+        logging.info("Classes are balanced")
+    else:
+        logging.info("Classes are not balanced")
+
+
+def shuffle_data(data):
+    data_shuffled = data.sample(frac=1, random_state=42)
+    logging.info("Data shuffled")
+
+    return data_shuffled
+
+
+def split_dataset_into_subsamples(data_frame):
+    data = list(data_frame[DATA_COLUMN_NAME].values)
+    labels = list(data_frame[LABELS_COLUMN_NAME].values)
+
+    dataset = tf.data.Dataset.from_tensor_slices((data, labels))
+
+    train_dataset = dataset.take(TRAIN_SIZE).batch(BATCH_SIZE)
+    validation_dataset = dataset.skip(TRAIN_SIZE).take(VALIDATION_SIZE).batch(BATCH_SIZE)
+    test_dataset = dataset.skip(TRAIN_SIZE + VALIDATION_SIZE).take(TEST_SIZE).batch(BATCH_SIZE)
+    logging.info("Data split")
+
+    return train_dataset, validation_dataset, test_dataset
+
+
+def get_statistics(model, train_dataset, validation_dataset, test_dataset):
+    learning_rate = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=INITIAL_LEARNING_RATE,
+        decay_steps=DECAY_STEPS,
+        decay_rate=DECAY_RATE,
+        staircase=True
+    )
+
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.1,
+        patience=6,
+        verbose=1,
+        min_lr=MIN_LEARNING_RATE
+    )
+
+    model.compile(
+        optimizer=tf.keras.optimizers.experimental.SGD(learning_rate=learning_rate),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+        metrics=['accuracy']
+    )
+
+    model_history = model.fit(
+        x=train_dataset,
+        validation_data=validation_dataset,
+        epochs=EPOCHS,
+        callbacks=[reduce_lr],
+        verbose=1
+    )
+
+    loss, accuracy = model.evaluate(test_dataset)
+    logging.info(f"Model: {accuracy=}, {loss=}")
+
+    accuracy = model_history.history['accuracy']
+    validation_accuracy = model_history.history['val_accuracy']
+    loss = model_history.history['loss']
+    validation_loss = model_history.history['val_loss']
+
+    return loss, accuracy, validation_loss, validation_accuracy
+
+
+def get_neural_network_statistics(train_dataset, validation_dataset, test_dataset):
+    losses = list()
+    accuracies = list()
+    validation_losses = list()
+    validation_accuracies = list()
+
+    train_dataset = train_dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+    validation_dataset = validation_dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+    test_dataset = test_dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+
+    conv_model = tf.keras.Sequential([
+        tf.keras.layers.Rescaling(1. / 255),
+        tf.keras.layers.Conv2D(
+            32, (3, 3), activation='relu',
+            input_shape=(28, 28, 1),
+            kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Conv2D(64, (3, 3), activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.Dropout(0.4),
+        tf.keras.layers.Dense(CLASSES_COUNT, activation='softmax')
+    ])
+
+    pooling_model = tf.keras.Sequential([
+        tf.keras.layers.Rescaling(1. / 255),
+        tf.keras.layers.MaxPooling2D((2, 2), input_shape=(28, 28, 1)),
+        tf.keras.layers.MaxPooling2D((2, 2)),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.Dropout(0.4),
+        tf.keras.layers.Dense(CLASSES_COUNT, activation='softmax')
+    ])
+
+    lenet_model = tf.keras.Sequential([
+        tf.keras.layers.Rescaling(1. / 255),
+        tf.keras.layers.Conv2D(
+            6, (5, 5), activation='relu',
+            input_shape=(28, 28, 1),
+            kernel_regularizer=tf.keras.regularizers.L2(1e-5)
+        ),
+        tf.keras.layers.AveragePooling2D((2, 2)),
+        tf.keras.layers.Conv2D(16, (5, 5), activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.AveragePooling2D((2, 2)),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(120, activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.Dense(84, activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
+        tf.keras.layers.Dense(CLASSES_COUNT, activation='softmax')
+    ])
+
+    conv_model_stats = get_statistics(
+        conv_model, train_dataset, validation_dataset, test_dataset
+    )
+
+    pooling_model_stats = get_statistics(
+        pooling_model, train_dataset, validation_dataset, test_dataset
+    )
+
+    lenet_model_stats = get_statistics(
+        lenet_model, train_dataset, validation_dataset, test_dataset
+    )
+
+    losses.extend((conv_model_stats[0], pooling_model_stats[0], lenet_model_stats[0]))
+    accuracies.extend((conv_model_stats[1], pooling_model_stats[1], lenet_model_stats[1]))
+    validation_losses.extend((conv_model_stats[2], pooling_model_stats[2], lenet_model_stats[2]))
+    validation_accuracies.extend((conv_model_stats[3], pooling_model_stats[3], lenet_model_stats[3]))
+
+    return losses, accuracies, validation_losses, validation_accuracies
+
+
+def show_result_plot(losses, accuracies, validation_losses, validation_accuracies):
+    plt.figure(figsize=(20, 14))
+
+    plt.subplot(1, 2, 1)
+    plt.title('Training and Validation Loss')
+    plt.plot(EPOCHS_RANGE, losses[0], label='Train Convolutional Loss')
+    plt.plot(EPOCHS_RANGE, validation_losses[0], label='Validation Convolutional Loss', linestyle='dashed')
+    plt.plot(EPOCHS_RANGE, losses[1], label='Train Pooling Loss')
+    plt.plot(EPOCHS_RANGE, validation_losses[1], label='Validation Pooling Loss', linestyle='dashed')
+    plt.plot(EPOCHS_RANGE, losses[2], label='Train Lenet Loss')
+    plt.plot(EPOCHS_RANGE, validation_losses[2], label='Validation Lenet Loss', linestyle='dashed')
+    plt.legend(loc='upper right')
+
+    plt.subplot(1, 2, 2)
+    plt.title('Training and Validation Accuracy')
+    plt.plot(EPOCHS_RANGE, accuracies[0], label='Train Convolutional Accuracy')
+    plt.plot(EPOCHS_RANGE, validation_accuracies[0], label='Validation Convolutional Accuracy', linestyle='dashed')
+    plt.plot(EPOCHS_RANGE, accuracies[1], label='Train Pooling Accuracy')
+    plt.plot(EPOCHS_RANGE, validation_accuracies[1], label='Validation Pooling Accuracy', linestyle='dashed')
+    plt.plot(EPOCHS_RANGE, accuracies[2], label='Train Lenet Accuracy')
+    plt.plot(EPOCHS_RANGE, validation_accuracies[2], label='Validation Lenet Accuracy', linestyle='dashed')
+    plt.legend(loc='lower right')
+
+    plt.show()
+    logging.info("Plot shown")
+
+
+def main():
+    start_time = datetime.datetime.now()
+
+    show_some_images()
+
+    data_frame = create_data_frame()
+    data_frame = remove_duplicates(data_frame)
+    check_classes_balance(data_frame)
+    data_frame = shuffle_data(data_frame)
+
+    train_dataset, validation_dataset, test_dataset = split_dataset_into_subsamples(data_frame)
+
+    losses, accuracies, validation_losses, validation_accuracies = get_neural_network_statistics(
+        train_dataset, validation_dataset, test_dataset
+    )
+    show_result_plot(losses, accuracies, validation_losses, validation_accuracies)
+
+    end_time = datetime.datetime.now()
+    logging.info(end_time - start_time)
+
+
+main()
