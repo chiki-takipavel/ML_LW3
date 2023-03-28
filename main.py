@@ -217,7 +217,7 @@ def get_neural_network_statistics(train_dataset, validation_dataset, test_datase
         tf.keras.layers.Conv2D(
             6, (5, 5), activation='relu',
             input_shape=(28, 28, 1),
-            kernel_regularizer=tf.keras.regularizers.L2(1e-5)
+            kernel_regularizer=tf.keras.regularizers.L2(0.001)
         ),
         tf.keras.layers.AveragePooling2D((2, 2)),
         tf.keras.layers.Conv2D(16, (5, 5), activation='relu', kernel_regularizer=tf.keras.regularizers.L2(0.001)),
